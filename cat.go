@@ -21,6 +21,15 @@ import "math"
 
 const IO_BLK_SIZE_DEFAULT int64 = 128*1024; // default taken from Unix cat [1]
 
+// options
+var number_nonblank bool = false
+var number bool = false
+var squeeze_blank bool = false
+var show_nonprinting bool = false
+var show_tabs bool = false
+var show_ends bool = false
+var special_flag string
+
 func simple_cat(f *os.File, buf []byte) bool {
    for ;; {
       n_read, ok := f.Read(buf)
@@ -46,8 +55,6 @@ func simple_cat(f *os.File, buf []byte) bool {
 }
 
 func handle_file(fName string, out_bSize int64) bool {
-   var in_stat syscall.Stat_t
-
    // os.Open() defaults to O_RDONLY permission
    fDes, ok := os.Open(fName)
    if ok != nil {
@@ -62,6 +69,7 @@ func handle_file(fName string, out_bSize int64) bool {
       }
    }()
 
+   var in_stat syscall.Stat_t
    if ok = syscall.Fstat(int(fDes.Fd()), &in_stat); ok != nil {
       panic(ok)
    }
@@ -78,7 +86,103 @@ func handle_file(fName string, out_bSize int64) bool {
    return ret;
 }
 
-func main() { 
+func printUsage() {
+   fmt.Printf("Usage: cat [OPTION]... [FILE]...\nConcatenate FILE(s) to standard output.\n")
+   fmt.Printf("\n" +
+              "-A, --show-all           equivalent to -vET\n" +
+              "-b, --number-nonblank    number nonempty output lines, overrides -n\n" +
+              "-e                       equivalent to -vE\n" +
+              "-E, --show-ends          display $ at end of each line\n" +
+              "-n, --number             number all output lines\n" +
+              "-s, --squeeze-blank      suppress repeated empty output lines\n")
+
+   fmt.Printf("-t                       equivalent to -vT\n" +
+              "-T, --show-tabs          display TAB characters as ^I\n" +
+              "-u                       (ignored)\n" +
+              "-v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB\n")
+   fmt.Printf("      --help     display this help and exit\n")
+   fmt.Printf("      --version  output version information and exit\n")
+   fmt.Printf("\n" +
+            "Examples:\n" +
+            "  cat f - g  Output f's contents, then standard input, then g's contents.\n" +
+            "  cat        Copy standard input to standard output.\n")
+}
+
+// parses command line args for flags
+func checkForFlag(arg string) bool {
+   arg_len := len(arg)
+
+   // a filename
+   if arg_len != 0 && arg[0] != '-' {
+      return false;
+   }
+
+   if arg_len > 2 && arg[:2] == "--" {
+      // long flag
+      switch arg[2:] {
+         case "number-nonblank":
+            number_nonblank = true
+         case "number":
+            number = true
+         case "squeeze-blank":
+            squeeze_blank = true
+         case "show-tabs":
+            show_tabs = true
+         case "show-ends":
+            show_ends = true
+         case "show-all":
+            show_tabs = true
+            show_ends = true
+            fallthrough
+         case "show-nonprinting":
+            show_nonprinting = true
+         case "version":
+            fallthrough
+         case "help":
+            fallthrough
+         default:
+            special_flag = arg[2:]
+      }
+   } else if arg_len > 1 && arg[0] == '-' {
+      // shorthand flags
+      for _, c := range arg[1:] {
+         switch c {
+         case 'b':
+            number_nonblank = true
+         case 'n':
+            number = true
+         case 's':
+            squeeze_blank = true
+         case 't':
+            show_tabs = true
+            show_nonprinting = true;
+         case 'E':
+            show_ends = true
+         case 'A':
+            show_tabs = true
+            fallthrough
+         case 'e':
+            show_ends = true
+            fallthrough
+         case 'v':
+            show_nonprinting = true
+         case 'T':
+            show_tabs = true
+         case 'u':
+            // ignored
+         default:
+            special_flag = string(c)
+         }
+      }
+   } else {
+      // only "-" and "--" (STDIN re-route) get here
+      return false
+   }
+
+   return true
+}
+
+func main() {
    args := os.Args[1:]
    n_args := len(args)
    ret := true;
@@ -96,13 +200,43 @@ func main() {
    out_bSize := int64(math.Max(float64(out_stat.Blksize), float64(IO_BLK_SIZE_DEFAULT)))
 
    // read in each file and route to stdout
-   for i := 0; i < n_args; i++ {
-      ret = handle_file(args[i], out_bSize) && ret
+   // reverse order for defer stack
+   first_file := -1
+   for i := n_args-1; i >= 0; i-- {
+      // flags in non-reverse order
+      if checkForFlag(args[i]) {
+         continue
+      }
+
+      // save "bottom of stack"
+      first_file = i;
+
+      // is file, defer processing until all flags are processed
+      // this helps prevents files from being processed at all if there is a --version or --help flag
+      defer func(x *bool, idx int) {
+         *x = *x && handle_file(args[idx], out_bSize) // process file, save successes across defers
+
+         // bottom of stack exits with success code
+         if idx == first_file && *x {
+            os.Exit(0)
+         } else if idx == first_file {
+            os.Exit(1);
+         }
+      } (&ret, i)
    }
 
-   if ret {
-      os.Exit(0);
+   // process first special/invalid flag before handling files
+   if special_flag == "help" {
+      printUsage()
+      os.Exit(0)
+   } else if special_flag == "version" {
+      fmt.Printf("cat (Gotilities) v0.2\nAuthor: prbrown\ngithub.com/prbrown/gotilities")
+      os.Exit(0)
+   } else if len(special_flag) > 1 { // invalid -- message
+      fmt.Fprintf(os.Stderr, "cat: unrecognized option '--%s'\nTry 'cat --help' for more information.\n", special_flag)
+      os.Exit(1)
+   } else { // invalid - message
+      fmt.Fprintf(os.Stderr, "cat: invalid option -- '%s'\nTry 'cat --help' for more information.\n", special_flag)
+      os.Exit(1)
    }
-
-   os.Exit(1);
 }
